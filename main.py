@@ -1,125 +1,117 @@
-{\rtf1\ansi\ansicpg1252\cocoartf2822
-\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 HelveticaNeue;}
-{\colortbl;\red255\green255\blue255;}
-{\*\expandedcolortbl;;}
-\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
-\deftab560
-\pard\pardeftab560\slleading20\partightenfactor0
+from fastapi import FastAPI, HTTPException
+from starlette.middleware.cors import CORSMiddleware
+import os
+import logging
+import uuid
+from datetime import datetime
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
-\f0\fs26 \cf0 from fastapi import FastAPI, HTTPException\
-from starlette.middleware.cors import CORSMiddleware\
-import os\
-import logging\
-import uuid\
-from datetime import datetime\
-from pydantic import BaseModel, Field\
-from typing import List, Optional\
-\
-logging.basicConfig(level=logging.INFO)\
-logger = logging.getLogger(__name__)\
-\
-app = FastAPI(title="Wash This?? API", version="1.0.0")\
-\
-class LaundryAnalysisRequest(BaseModel):\
-    images: List[str]\
-    analysis_type: str = "clothing"\
-    user_notes: Optional[str] = None\
-\
-class WashingRecommendation(BaseModel):\
-    can_wash_together: bool\
-    temperature: str\
-    cycle: str\
-    detergent_type: str\
-    special_instructions: List[str]\
-    reasoning: str\
-\
-class LaundryAnalysisResponse(BaseModel):\
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))\
-    timestamp: datetime = Field(default_factory=datetime.utcnow)\
-    recommendation: WashingRecommendation\
-    items_analyzed: List[str]\
-\
-def get_mock_recommendation(analysis_type: str, user_notes: str = None) -> WashingRecommendation:\
-    if analysis_type == "wash_tag":\
-        return WashingRecommendation(\
-            can_wash_together=True,\
-            temperature="as indicated on label",\
-            cycle="normal",\
-            detergent_type="regular",\
-            special_instructions=[\
-                "Follow the care symbols on the label",\
-                "Check water temperature symbols",\
-                "Look for drying and ironing instructions"\
-            ],\
-            reasoning="Care label analysis - follow the symbols shown on your garment's tag"\
-        )\
-    else:\
-        return WashingRecommendation(\
-            can_wash_together=False,\
-            temperature="cold",\
-            cycle="normal", \
-            detergent_type="color-safe",\
-            special_instructions=[\
-                "Separate lights and darks",\
-                "Turn jeans inside out",\
-                "Use cold water to prevent shrinking",\
-                "Check pockets before washing"\
-            ],\
-            reasoning="General laundry guidance - sort by color and fabric type for best results"\
-        )\
-\
-@app.post("/api/analyze-laundry", response_model=LaundryAnalysisResponse)\
-async def analyze_laundry(request: LaundryAnalysisRequest):\
-    try:\
-        if not request.images:\
-            raise HTTPException(status_code=400, detail="At least one image is required")\
-\
-        if request.analysis_type not in ["clothing", "wash_tag"]:\
-            raise HTTPException(status_code=400, detail="analysis_type must be 'clothing' or 'wash_tag'")\
-\
-        recommendation = get_mock_recommendation(request.analysis_type, request.user_notes)\
-        \
-        analysis_response = LaundryAnalysisResponse(\
-            recommendation=recommendation,\
-            items_analyzed=["clothing_item"]\
-        )\
-        \
-        return analysis_response\
-\
-    except HTTPException:\
-        raise\
-    except Exception as e:\
-        logger.error(f"Error analyzing laundry: \{str(e)\}")\
-        raise HTTPException(status_code=500, detail=str(e))\
-\
-@app.get("/api/analysis-history")\
-async def get_analysis_history(limit: int = 10):\
-    return \{"analyses": [], "message": "History feature coming soon"\}\
-\
-@app.get("/api/")\
-async def root():\
-    return \{\
-        "message": "Wash This?? API is running", \
-        "version": "1.0.0",\
-        "status": "working"\
-    \}\
-\
-@app.get("/")\
-async def home():\
-    return \{"message": "Wash This?? Backend", "docs": "/docs"\}\
-\
-app.add_middleware(\
-    CORSMiddleware,\
-    allow_origins=["*"],\
-    allow_credentials=True,\
-    allow_methods=["*"],\
-    allow_headers=["*"],\
-)\
-\
-@app.get("/health")\
-async def health_check():\
-    return \{"status": "healthy", "timestamp": datetime.utcnow().isoformat()\}\
-\
-if __name__ == "__main__":\
-    import uvicorn\
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))}
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Wash This?? API", version="1.0.0")
+
+class LaundryAnalysisRequest(BaseModel):
+    images: List[str]
+    analysis_type: str = "clothing"
+    user_notes: Optional[str] = None
+
+class WashingRecommendation(BaseModel):
+    can_wash_together: bool
+    temperature: str
+    cycle: str
+    detergent_type: str
+    special_instructions: List[str]
+    reasoning: str
+
+class LaundryAnalysisResponse(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    recommendation: WashingRecommendation
+    items_analyzed: List[str]
+
+def get_mock_recommendation(analysis_type: str, user_notes: str = None) -> WashingRecommendation:
+    if analysis_type == "wash_tag":
+        return WashingRecommendation(
+            can_wash_together=True,
+            temperature="as indicated on label",
+            cycle="normal",
+            detergent_type="regular",
+            special_instructions=[
+                "Follow the care symbols on the label",
+                "Check water temperature symbols",
+                "Look for drying and ironing instructions"
+            ],
+            reasoning="Care label analysis - follow the symbols shown on your garment's tag"
+        )
+    else:
+        return WashingRecommendation(
+            can_wash_together=False,
+            temperature="cold",
+            cycle="normal", 
+            detergent_type="color-safe",
+            special_instructions=[
+                "Separate lights and darks",
+                "Turn jeans inside out",
+                "Use cold water to prevent shrinking",
+                "Check pockets before washing"
+            ],
+            reasoning="General laundry guidance - sort by color and fabric type for best results"
+        )
+
+@app.post("/api/analyze-laundry", response_model=LaundryAnalysisResponse)
+async def analyze_laundry(request: LaundryAnalysisRequest):
+    try:
+        if not request.images:
+            raise HTTPException(status_code=400, detail="At least one image is required")
+
+        if request.analysis_type not in ["clothing", "wash_tag"]:
+            raise HTTPException(status_code=400, detail="analysis_type must be 'clothing' or 'wash_tag'")
+
+        recommendation = get_mock_recommendation(request.analysis_type, request.user_notes)
+        
+        analysis_response = LaundryAnalysisResponse(
+            recommendation=recommendation,
+            items_analyzed=["clothing_item"]
+        )
+        
+        return analysis_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error analyzing laundry: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/analysis-history")
+async def get_analysis_history(limit: int = 10):
+    return {"analyses": [], "message": "History feature coming soon"}
+
+@app.get("/api/")
+async def root():
+    return {
+        "message": "Wash This?? API is running", 
+        "version": "1.0.0",
+        "status": "working"
+    }
+
+@app.get("/")
+async def home():
+    return {"message": "Wash This?? Backend", "docs": "/docs"}
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
