@@ -1,19 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Any
-import openai
-import base64
-import io
-from PIL import Image
+from pydantic import BaseModel
+from typing import List, Optional
+import requests
+import json
 import os
-from dotenv import load_dotenv
-import pymongo
 from datetime import datetime
-import uuid
-
-# Load environment variables
-load_dotenv()
 
 app = FastAPI(title="Wash This?? API", version="1.0.0")
 
@@ -26,29 +18,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB connection
-MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-client = pymongo.MongoClient(MONGO_URL)
-db = client.laundry_db
-analyses_collection = db.analyses
-
-# OpenAI configuration
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Get API key from environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 class LaundryAnalysisRequest(BaseModel):
-    images: List[str] = Field(..., min_items=1, max_items=5)
-    analysis_type: str = Field(..., regex="^(clothing|wash_tag)$")
+    images: List[str]
+    analysis_type: str
     user_notes: Optional[str] = None
-
-    @validator('images')
-    def validate_images(cls, v):
-        for img in v:
-            try:
-                # Validate base64
-                base64.b64decode(img)
-            except Exception:
-                raise ValueError("Invalid base64 format")
-        return v
 
 class WashingRecommendation(BaseModel):
     can_wash_together: bool
@@ -56,196 +32,164 @@ class WashingRecommendation(BaseModel):
     cycle: str
     detergent_type: str
     special_instructions: List[str]
-    separate_loads: Optional[List[Dict[str, Any]]] = None
     reasoning: str
 
 class LaundryAnalysisResponse(BaseModel):
     recommendation: WashingRecommendation
     items_analyzed: List[str]
-    analysis_id: str
-    timestamp: datetime
 
-def get_enhanced_care_label_prompt():
-    return """
-You are an expert at reading and decoding clothing care labels. Analyze the care label image and decode each symbol you can see.
-
-IMPORTANT: Do NOT give generic advice like "follow the symbols" or "check the label". Instead, decode each specific symbol you see in the image.
-
-For each symbol visible, provide the exact meaning:
-- Washing symbols: "Machine wash at [temperature]°C" or "Hand wash only" or "Do not wash"
-- Bleaching symbols: "Do not bleach" or "Bleach allowed" or "Non-chlorine bleach only"
-- Drying symbols: "Tumble dry low heat" or "Air dry" or "Do not tumble dry"
-- Ironing symbols: "Iron at low/medium/high heat" or "Do not iron"
-- Dry cleaning symbols: "Dry clean only" or "Do not dry clean"
-
-Look carefully at each symbol and decode what it specifically means. If you can't see a symbol clearly, say "Symbol not clearly visible" for that category.
-
-Provide specific washing instructions based on the symbols you can actually see in the image.
-"""
-
-def get_enhanced_clothing_prompt():
-    return """
-You are a laundry expert analyzing clothing items to determine if they can be washed together safely.
-
-Analyze the clothing items in the image(s) and consider:
-- Fabric types and colors
-- Potential for color bleeding
-- Different care requirements
-- Fabric delicacy levels
-
-Provide specific, actionable washing recommendations including exact temperature, cycle type, and detergent recommendations.
-
-If items cannot be washed together, explain exactly why and suggest how to separate them.
-"""
-
-def analyze_with_openai(images: List[str], analysis_type: str, user_notes: Optional[str] = None) -> Dict[str, Any]:
-    """Enhanced AI analysis with better prompts for care labels"""
+def analyze_with_openai_simple(images: List[str], analysis_type: str) -> dict:
+    """Simplified OpenAI analysis using direct HTTP requests"""
     
-    # Choose the appropriate prompt based on analysis type
-    if analysis_type == "wash_tag":
-        system_prompt = get_enhanced_care_label_prompt()
-    else:
-        system_prompt = get_enhanced_clothing_prompt()
-    
-    # Prepare images for OpenAI
-    image_urls = []
-    for img_base64 in images:
-        image_urls.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{img_base64}",
-                "detail": "high"
-            }
-        })
-    
-    # Prepare the message content
-    content = [{"type": "text", "text": system_prompt}] + image_urls
-    
-    if user_notes:
-        content.append({"type": "text", "text": f"Additional notes: {user_notes}"})
+    if not OPENAI_API_KEY:
+        # Fallback response if no API key
+        return get_fallback_response(analysis_type)
     
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4-vision-preview",
-            messages=[
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+        
+        # Prepare image data
+        image_content = []
+        for img_base64 in images[:1]:  # Only use first image to keep it simple
+            image_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{img_base64}"
+                }
+            })
+        
+        # Choose prompt based on analysis type
+        if analysis_type == "wash_tag":
+            prompt = "Analyze this care label image and decode each care symbol you see. Provide specific washing instructions for each symbol (temperature, drying, ironing, etc.). Do not give generic advice - decode the actual symbols."
+        else:
+            prompt = "Analyze these clothing items and determine if they can be washed together safely. Consider fabric types, colors, and care requirements. Provide specific washing recommendations."
+        
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
                 {
                     "role": "user",
-                    "content": content
+                    "content": [
+                        {"type": "text", "text": prompt}
+                    ] + image_content
                 }
             ],
-            max_tokens=1000,
-            temperature=0.3
+            "max_tokens": 500
+        }
+        
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
         )
         
-        ai_response = response.choices[0].message.content
-        
-        # Enhanced parsing for care label responses
-        if analysis_type == "wash_tag":
-            return parse_care_label_response(ai_response)
+        if response.status_code == 200:
+            result = response.json()
+            ai_response = result["choices"][0]["message"]["content"]
+            return parse_ai_response(ai_response, analysis_type)
         else:
-            return parse_clothing_analysis_response(ai_response)
+            return get_fallback_response(analysis_type)
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI analysis failed: {str(e)}")
+        print(f"AI analysis error: {e}")
+        return get_fallback_response(analysis_type)
 
-def parse_care_label_response(ai_response: str) -> Dict[str, Any]:
-    """Enhanced parsing specifically for care label analysis"""
-    
-    # Extract temperature information
-    temperature = "as indicated on label"
-    if "30°C" in ai_response or "30 degrees" in ai_response.lower():
-        temperature = "30°C maximum"
-    elif "40°C" in ai_response or "40 degrees" in ai_response.lower():
-        temperature = "40°C maximum"
-    elif "60°C" in ai_response or "60 degrees" in ai_response.lower():
-        temperature = "60°C maximum"
-    elif "cold" in ai_response.lower() or "cold water" in ai_response.lower():
-        temperature = "cold water only"
-    elif "hand wash" in ai_response.lower():
-        temperature = "hand wash only"
-    elif "do not wash" in ai_response.lower():
-        temperature = "do not wash"
-    
-    # Extract cycle information
-    cycle = "normal"
-    if "gentle" in ai_response.lower() or "delicate" in ai_response.lower():
-        cycle = "gentle/delicate"
-    elif "permanent press" in ai_response.lower():
-        cycle = "permanent press"
-    elif "hand wash" in ai_response.lower():
-        cycle = "hand wash"
-    
-    # Extract detergent information
-    detergent_type = "regular"
-    if "no bleach" in ai_response.lower() or "do not bleach" in ai_response.lower():
-        detergent_type = "color-safe (no bleach)"
-    elif "gentle" in ai_response.lower() or "mild" in ai_response.lower():
-        detergent_type = "gentle detergent"
-    
-    # Extract special instructions from the response
-    special_instructions = []
-    lines = ai_response.split('\n')
-    for line in lines:
-        line = line.strip()
-        if line and ('•' in line or '-' in line or 'do not' in line.lower() or 'iron' in line.lower() or 'dry' in line.lower()):
-            # Clean up the instruction
-            instruction = line.replace('•', '').replace('-', '').strip()
-            if instruction and len(instruction) > 10:  # Only add substantial instructions
-                special_instructions.append(instruction)
-    
-    # If no specific instructions found, add some generic ones
-    if not special_instructions:
-        special_instructions = [
-            "Follow care symbols on the label exactly",
-            "Check water temperature symbols carefully",
-            "Look for drying and ironing instructions",
-            "Pay attention to bleaching restrictions"
-        ]
-    
-    return {
-        "can_wash_together": True,  # For care labels, this is always True since it's one item
-        "temperature": temperature,
-        "cycle": cycle,
-        "detergent_type": detergent_type,
-        "special_instructions": special_instructions,
-        "reasoning": ai_response,
-        "items_analyzed": ["Care label"]
-    }
+def get_fallback_response(analysis_type: str) -> dict:
+    """Fallback response when AI is not available"""
+    if analysis_type == "wash_tag":
+        return {
+            "can_wash_together": True,
+            "temperature": "30°C maximum",
+            "cycle": "gentle",
+            "detergent_type": "mild detergent",
+            "special_instructions": [
+                "Check care label for specific temperature symbols",
+                "Look for drying instructions on the label",
+                "Follow ironing temperature symbols",
+                "Check for bleaching restrictions"
+            ],
+            "reasoning": "Care label analysis: Please refer to the specific symbols on your care label for detailed instructions.",
+            "items_analyzed": ["Care label"]
+        }
+    else:
+        return {
+            "can_wash_together": True,
+            "temperature": "cold",
+            "cycle": "normal",
+            "detergent_type": "color-safe",
+            "special_instructions": [
+                "Separate dark and light colors",
+                "Check fabric care labels",
+                "Use appropriate water temperature",
+                "Consider fabric delicacy"
+            ],
+            "reasoning": "General laundry recommendation: For best results, separate by color and fabric type.",
+            "items_analyzed": ["Clothing items"]
+        }
 
-def parse_clothing_analysis_response(ai_response: str) -> Dict[str, Any]:
-    """Parse clothing analysis response"""
+def parse_ai_response(ai_response: str, analysis_type: str) -> dict:
+    """Parse AI response into structured data"""
     
-    # Determine if items can be washed together
+    # Determine if items can be washed together (for clothing analysis)
     can_wash_together = True
-    if any(phrase in ai_response.lower() for phrase in ["cannot", "can't", "should not", "separate", "different loads"]):
+    if analysis_type == "clothing" and any(word in ai_response.lower() for word in ["cannot", "separate", "different"]):
         can_wash_together = False
     
     # Extract temperature
     temperature = "cold"
-    if "warm" in ai_response.lower():
+    if "30°c" in ai_response.lower() or "30 degrees" in ai_response.lower():
+        temperature = "30°C maximum"
+    elif "40°c" in ai_response.lower() or "40 degrees" in ai_response.lower():
+        temperature = "40°C maximum"
+    elif "warm" in ai_response.lower():
         temperature = "warm"
     elif "hot" in ai_response.lower():
         temperature = "hot"
+    elif "hand wash" in ai_response.lower():
+        temperature = "hand wash only"
     
     # Extract cycle
     cycle = "normal"
     if "gentle" in ai_response.lower() or "delicate" in ai_response.lower():
         cycle = "gentle"
+    elif "hand" in ai_response.lower():
+        cycle = "hand wash"
     
     # Extract detergent type
     detergent_type = "regular"
-    if "color-safe" in ai_response.lower():
+    if "no bleach" in ai_response.lower() or "color-safe" in ai_response.lower():
         detergent_type = "color-safe"
+    elif "gentle" in ai_response.lower() or "mild" in ai_response.lower():
+        detergent_type = "mild detergent"
     
     # Extract special instructions
     special_instructions = []
     lines = ai_response.split('\n')
     for line in lines:
         line = line.strip()
-        if line and ('•' in line or '-' in line or 'separate' in line.lower()):
+        if line and any(marker in line for marker in ['•', '-', '1.', '2.', '3.']):
             instruction = line.replace('•', '').replace('-', '').strip()
-            if instruction and len(instruction) > 10:
+            if len(instruction) > 10:
                 special_instructions.append(instruction)
+    
+    # If no instructions found, add some basic ones
+    if not special_instructions:
+        if analysis_type == "wash_tag":
+            special_instructions = [
+                "Follow temperature symbols carefully",
+                "Check drying and ironing instructions",
+                "Look for bleaching restrictions"
+            ]
+        else:
+            special_instructions = [
+                "Separate by color and fabric type",
+                "Check care labels before washing",
+                "Use appropriate detergent"
+            ]
     
     return {
         "can_wash_together": can_wash_together,
@@ -254,7 +198,7 @@ def parse_clothing_analysis_response(ai_response: str) -> Dict[str, Any]:
         "detergent_type": detergent_type,
         "special_instructions": special_instructions,
         "reasoning": ai_response,
-        "items_analyzed": ["Clothing items"]
+        "items_analyzed": ["Care label" if analysis_type == "wash_tag" else "Clothing items"]
     }
 
 @app.get("/")
@@ -262,8 +206,8 @@ async def root():
     return {
         "message": "Wash This?? API is running",
         "version": "1.0.0",
-        "ai_enabled": True,
-        "model": "gpt-4-vision-preview"
+        "ai_enabled": bool(OPENAI_API_KEY),
+        "model": "gpt-4o-mini"
     }
 
 @app.get("/api/")
@@ -271,8 +215,8 @@ async def api_root():
     return {
         "message": "Wash This?? API is running",
         "version": "1.0.0",
-        "ai_enabled": True,
-        "model": "gpt-4-vision-preview"
+        "ai_enabled": bool(OPENAI_API_KEY),
+        "model": "gpt-4o-mini"
     }
 
 @app.post("/api/analyze-laundry", response_model=LaundryAnalysisResponse)
@@ -282,17 +226,16 @@ async def analyze_laundry(request: LaundryAnalysisRequest):
         if not request.images:
             raise HTTPException(status_code=400, detail="No images provided")
         
-        # Analyze with AI
-        analysis_result = analyze_with_openai(
+        if request.analysis_type not in ["clothing", "wash_tag"]:
+            raise HTTPException(status_code=400, detail="Invalid analysis type")
+        
+        # Analyze with AI or fallback
+        analysis_result = analyze_with_openai_simple(
             request.images, 
-            request.analysis_type, 
-            request.user_notes
+            request.analysis_type
         )
         
-        # Create response
-        analysis_id = str(uuid.uuid4())
-        timestamp = datetime.now()
-        
+        # Create recommendation
         recommendation = WashingRecommendation(
             can_wash_together=analysis_result["can_wash_together"],
             temperature=analysis_result["temperature"],
@@ -302,26 +245,11 @@ async def analyze_laundry(request: LaundryAnalysisRequest):
             reasoning=analysis_result["reasoning"]
         )
         
+        # Create response
         response = LaundryAnalysisResponse(
             recommendation=recommendation,
-            items_analyzed=analysis_result["items_analyzed"],
-            analysis_id=analysis_id,
-            timestamp=timestamp
+            items_analyzed=analysis_result["items_analyzed"]
         )
-        
-        # Save to database
-        try:
-            analysis_doc = {
-                "id": analysis_id,
-                "timestamp": timestamp,
-                "analysis_type": request.analysis_type,
-                "recommendation": recommendation.dict(),
-                "items_analyzed": analysis_result["items_analyzed"]
-            }
-            analyses_collection.insert_one(analysis_doc)
-        except Exception as db_error:
-            print(f"Database save error: {db_error}")
-            # Continue without failing the request
         
         return response
         
@@ -331,18 +259,13 @@ async def analyze_laundry(request: LaundryAnalysisRequest):
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.get("/api/analysis-history")
-async def get_analysis_history(limit: int = 10):
-    try:
-        analyses = list(analyses_collection.find().sort("timestamp", -1).limit(limit))
-        
-        # Convert MongoDB documents to proper format
-        for analysis in analyses:
-            analysis["_id"] = str(analysis["_id"])
-        
-        return {"analyses": analyses}
-    except Exception as e:
-        return {"analyses": [], "error": str(e)}
+async def get_analysis_history():
+    # Simple response without database for now
+    return {
+        "analyses": [],
+        "message": "History feature will be available once database is connected"
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
